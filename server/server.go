@@ -139,7 +139,7 @@ func RootHandler(ctx context.Context, ac auth.AccessController, trust signed.Cry
 
 	r := mux.NewRouter()
 	r.Methods("GET").Path("/v2/").Handler(authWrapper(handlers.MainHandler))
-	r.Methods("POST").Path("/v2/{gun:[^*]+}/_trust/tuf/").Handler(CreateHandler(
+	r.Methods("POST").Path("/v2/{gun:.+}/_trust/tuf/").Handler(CreateHandler(
 		"UpdateTUF",
 		handlers.AtomicUpdateHandler,
 		invalidGUNErr,
@@ -149,7 +149,7 @@ func RootHandler(ctx context.Context, ac auth.AccessController, trust signed.Cry
 		authWrapper,
 		repoPrefixes,
 	))
-	r.Methods("GET").Path("/v2/{gun:[^*]+}/_trust/tuf/{tufRole:root|targets(?:/[^/\\s]+)*|snapshot|timestamp}.{checksum:[a-fA-F0-9]{64}|[a-fA-F0-9]{96}|[a-fA-F0-9]{128}}.json").Handler(CreateHandler(
+	r.Methods("GET").Path("/v2/{gun:.+}/_trust/tuf/{tufRole:root|targets(?:/[^/\\s]+)*|snapshot|timestamp}.{checksum:[a-fA-F0-9]{64}|[a-fA-F0-9]{96}|[a-fA-F0-9]{128}}.json").Handler(CreateHandler(
 		"GetRoleByHash",
 		handlers.GetHandler,
 		notFoundError,
@@ -159,7 +159,7 @@ func RootHandler(ctx context.Context, ac auth.AccessController, trust signed.Cry
 		authWrapper,
 		repoPrefixes,
 	))
-	r.Methods("GET").Path("/v2/{gun:[^*]+}/_trust/tuf/{version:[1-9]*[0-9]+}.{tufRole:root|targets(?:/[^/\\s]+)*|snapshot|timestamp}.json").Handler(CreateHandler(
+	r.Methods("GET").Path("/v2/{gun:.+}/_trust/tuf/{version:[1-9]*[0-9]+}.{tufRole:root|targets(?:/[^/\\s]+)*|snapshot|timestamp}.json").Handler(CreateHandler(
 		"GetRoleByVersion",
 		handlers.GetHandler,
 		notFoundError,
@@ -169,7 +169,7 @@ func RootHandler(ctx context.Context, ac auth.AccessController, trust signed.Cry
 		authWrapper,
 		repoPrefixes,
 	))
-	r.Methods("GET").Path("/v2/{gun:[^*]+}/_trust/tuf/{tufRole:root|targets(?:/[^/\\s]+)*|snapshot|timestamp}.json").Handler(CreateHandler(
+	r.Methods("GET").Path("/v2/{gun:.+}/_trust/tuf/{tufRole:root|targets(?:/[^/\\s]+)*|snapshot|timestamp}.json").Handler(CreateHandler(
 		"GetRole",
 		handlers.GetHandler,
 		notFoundError,
@@ -180,7 +180,7 @@ func RootHandler(ctx context.Context, ac auth.AccessController, trust signed.Cry
 		repoPrefixes,
 	))
 	r.Methods("GET").Path(
-		"/v2/{gun:[^*]+}/_trust/tuf/{tufRole:snapshot|timestamp}.key").Handler(CreateHandler(
+		"/v2/{gun:.+}/_trust/tuf/{tufRole:snapshot|timestamp}.key").Handler(CreateHandler(
 		"GetKey",
 		handlers.GetKeyHandler,
 		notFoundError,
@@ -191,7 +191,7 @@ func RootHandler(ctx context.Context, ac auth.AccessController, trust signed.Cry
 		repoPrefixes,
 	))
 	r.Methods("POST").Path(
-		"/v2/{gun:[^*]+}/_trust/tuf/{tufRole:snapshot|timestamp}.key").Handler(CreateHandler(
+		"/v2/{gun:.+}/_trust/tuf/{tufRole:snapshot|timestamp}.key").Handler(CreateHandler(
 		"RotateKey",
 		handlers.RotateKeyHandler,
 		notFoundError,
@@ -201,7 +201,7 @@ func RootHandler(ctx context.Context, ac auth.AccessController, trust signed.Cry
 		authWrapper,
 		repoPrefixes,
 	))
-	r.Methods("DELETE").Path("/v2/{gun:[^*]+}/_trust/tuf/").Handler(CreateHandler(
+	r.Methods("DELETE").Path("/v2/{gun:.+}/_trust/tuf/").Handler(CreateHandler(
 		"DeleteTUF",
 		handlers.DeleteHandler,
 		notFoundError,
@@ -211,7 +211,7 @@ func RootHandler(ctx context.Context, ac auth.AccessController, trust signed.Cry
 		authWrapper,
 		repoPrefixes,
 	))
-	r.Methods("GET").Path("/v2/{gun:[^*]+}/_trust/changefeed").Handler(CreateHandler(
+	r.Methods("GET").Path("/v2/{gun:.+}/_trust/changefeed").Handler(CreateHandler(
 		"Changefeed",
 		handlers.Changefeed,
 		notFoundError,

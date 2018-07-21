@@ -29,6 +29,7 @@ import (
 	"github.com/theupdateframework/notary/tuf/signed"
 	"github.com/theupdateframework/notary/tuf/testutils"
 	"github.com/theupdateframework/notary/tuf/utils"
+	"bufio"
 )
 
 type SignedRSARootTemplate struct {
@@ -49,7 +50,9 @@ type certChain struct {
 
 var (
 	_sampleRootData  *rootData
+	_sampleWildcardRootData *rootData
 	_sampleCertChain *certChain
+	_sampleWildcardCertChain *certChain
 )
 
 func sampleRootData(t *testing.T) *rootData {
@@ -66,6 +69,22 @@ func sampleRootData(t *testing.T) *rootData {
 		require.NoError(t, err)
 	}
 	return _sampleRootData
+}
+
+func sampleWildcardRootData(t *testing.T) *rootData {
+	if _sampleWildcardRootData == nil {
+		var err error
+		_sampleWildcardRootData = new(rootData)
+		// generate a single test repo we can use for testing
+		tufRepo, _, err := testutils.EmptyRepo("*.docker.com/notary")
+		require.NoError(t, err)
+		_sampleWildcardRootData.rootPubKeyID = tufRepo.Root.Signed.Roles[data.CanonicalRootRole].KeyIDs[0]
+		_sampleWildcardRootData.targetsPubkeyID = tufRepo.Root.Signed.Roles[data.CanonicalTargetsRole].KeyIDs[0]
+		tufRepo.Root.Signed.Version++
+		_sampleWildcardRootData.rootMeta, err = tufRepo.SignRoot(data.DefaultExpires(data.CanonicalRootRole), nil)
+		require.NoError(t, err)
+	}
+	return _sampleWildcardRootData
 }
 
 func sampleCertChain(t *testing.T) *certChain {
@@ -119,6 +138,60 @@ func sampleCertChain(t *testing.T) *certChain {
 		}
 	}
 	return _sampleCertChain
+}
+
+
+func wildcardCertChain(t *testing.T) *certChain {
+	if _sampleWildcardCertChain == nil {
+		// generate a CA, an intermediate, and a leaf certificate using CFSSL
+		// Create a simple CSR for the CA using the default CA validator and policy
+		req := &csr.CertificateRequest{
+			CN:         "*.docker.io/notary/root",
+			KeyRequest: csr.NewBasicKeyRequest(),
+			CA:         &csr.CAConfig{},
+		}
+
+		// Generate the CA and get the certificate and private key
+		rootCert, _, rootKey, _ := initca.New(req)
+		priv, _ := helpers.ParsePrivateKeyPEM(rootKey)
+		cert, _ := helpers.ParseCertificatePEM(rootCert)
+		s, _ := local.NewSigner(priv, cert, signer.DefaultSigAlgo(priv), initca.CAPolicy())
+
+		req.CN = "*.docker.io/notary/intermediate"
+		intCSR, intKey, _ := csr.ParseRequest(req)
+		intCert, _ := s.Sign(signer.SignRequest{
+			Request: string(intCSR),
+			Subject: &signer.Subject{CN: req.CN},
+		})
+
+		priv, _ = helpers.ParsePrivateKeyPEM(intKey)
+		cert, _ = helpers.ParseCertificatePEM(intCert)
+		s, _ = local.NewSigner(priv, cert, signer.DefaultSigAlgo(priv), &config.Signing{
+			Default: config.DefaultConfig(),
+		})
+		req.CA = nil
+		req.CN = "*.docker.io/notary/leaf"
+		leafCSR, leafKey, _ := csr.ParseRequest(req)
+		leafCert, _ := s.Sign(signer.SignRequest{
+			Request: string(leafCSR),
+			Subject: &signer.Subject{CN: req.CN},
+		})
+
+		parsedRootKey, _ := utils.ParsePEMPrivateKey(rootKey, "")
+		parsedIntKey, _ := utils.ParsePEMPrivateKey(intKey, "")
+		parsedLeafKey, _ := utils.ParsePEMPrivateKey(leafKey, "")
+
+		_sampleWildcardCertChain = &certChain{
+			rootCert:         rootCert,
+			intermediateCert: intCert,
+			leafCert:         leafCert,
+
+			rootKey:         parsedRootKey,
+			intermediateKey: parsedIntKey,
+			leafKey:         parsedLeafKey,
+		}
+	}
+	return _sampleWildcardCertChain
 }
 
 func TestValidateRoot(t *testing.T) {
@@ -400,8 +473,164 @@ func TestValidateRootWithPinnedCertAndIntermediates(t *testing.T) {
 	require.Equal(t, typedSignedRoot, validatedRoot)
 }
 
+func TestValidateRootWithPinnedWildcardCertAndIntermediates(t *testing.T) {
+	logger := logrus.New()
+	logger.Level = logrus.DebugLevel
+	logger.Out = bufio.NewWriter(os.Stdout)
+
+	now := time.Now()
+	memStore := trustmanager.NewKeyMemoryStore(passphraseRetriever)
+	cs := cryptoservice.NewCryptoService(memStore)
+
+	ecdsax509Key := data.NewECDSAx509PublicKey(append(wildcardCertChain(t).leafCert, wildcardCertChain(t).intermediateCert...))
+	require.NoError(t, cs.AddKey(data.CanonicalRootRole, "*.docker.io/notary/leaf", wildcardCertChain(t).leafKey))
+
+	otherKey, err := cs.Create(data.CanonicalTargetsRole, "*.docker.io/notary/leaf", data.ED25519Key)
+	require.NoError(t, err)
+
+	root := data.SignedRoot{
+		Signatures: make([]data.Signature, 0),
+		Signed: data.Root{
+			SignedCommon: data.SignedCommon{
+				Type:    "Root",
+				Expires: now.Add(time.Hour),
+				Version: 1,
+			},
+			Keys: map[string]data.PublicKey{
+				ecdsax509Key.ID(): ecdsax509Key,
+				otherKey.ID():     otherKey,
+			},
+			Roles: map[data.RoleName]*data.RootRole{
+				"root": {
+					KeyIDs:    []string{ecdsax509Key.ID()},
+					Threshold: 1,
+				},
+				"targets": {
+					KeyIDs:    []string{otherKey.ID()},
+					Threshold: 1,
+				},
+				"snapshot": {
+					KeyIDs:    []string{otherKey.ID()},
+					Threshold: 1,
+				},
+				"timestamp": {
+					KeyIDs:    []string{otherKey.ID()},
+					Threshold: 1,
+				},
+			},
+		},
+		Dirty: true,
+	}
+
+	signedRoot, err := root.ToSigned()
+	require.NoError(t, err)
+	err = signed.Sign(cs, signedRoot, []data.PublicKey{ecdsax509Key}, 1, nil)
+	require.NoError(t, err)
+
+	typedSignedRoot, err := data.RootFromSigned(signedRoot)
+	require.NoError(t, err)
+
+	tempBaseDir, err := ioutil.TempDir("", "notary-test-")
+	defer os.RemoveAll(tempBaseDir)
+	require.NoError(t, err, "failed to create a temporary directory: %s", err)
+
+	validatedRoot, err := trustpinning.ValidateRoot(
+		nil,
+		signedRoot,
+		"replica.docker.io/notary/leaf",
+		trustpinning.TrustPinConfig{
+			Certs: map[string][]string{
+				"*.docker.io/notary/leaf": {ecdsax509Key.ID()},
+			},
+			DisableTOFU: true,
+		},
+	)
+	require.NoError(t, err, "failed to validate certID with intermediate")
+	for idx, sig := range typedSignedRoot.Signatures {
+		if sig.KeyID == ecdsax509Key.ID() {
+			typedSignedRoot.Signatures[idx].IsValid = true
+		}
+	}
+	require.Equal(t, typedSignedRoot, validatedRoot)
+
+	// test it also works with a wildcarded gun in certs
+	validatedRoot, err = trustpinning.ValidateRoot(
+		nil,
+		signedRoot,
+		"replica.docker.io/notary/leaf",
+		trustpinning.TrustPinConfig{
+			Certs: map[string][]string{
+				"*.docker.io/notar*": {ecdsax509Key.ID()},
+			},
+			DisableTOFU: true,
+		},
+	)
+	require.NoError(t, err, "failed to validate certID with intermediate")
+	for idx, sig := range typedSignedRoot.Signatures {
+		if sig.KeyID == ecdsax509Key.ID() {
+			typedSignedRoot.Signatures[idx].IsValid = true
+		}
+	}
+	require.Equal(t, typedSignedRoot, validatedRoot)
+
+	// incorrect key id on wildcard match should fail
+	_, err = trustpinning.ValidateRoot(
+		nil,
+		signedRoot,
+		"replica.docker.io/notary/leaf",
+		trustpinning.TrustPinConfig{
+			Certs: map[string][]string{
+				"*.docker.io/notar*": {"badID"},
+			},
+			DisableTOFU: true,
+		},
+	)
+	require.Error(t, err, "failed to validate certID with intermediate")
+
+	// exact match should take precedence even if it fails validation
+	_, err = trustpinning.ValidateRoot(
+		nil,
+		signedRoot,
+		"replica.docker.io/notary/leaf",
+		trustpinning.TrustPinConfig{
+			Certs: map[string][]string{
+				"replica.docker.io/notary/leaf": {"badID"},
+				"replica.docker.io/notar*":      {ecdsax509Key.ID()},
+				"*.docker.io/notary/leaf":      {ecdsax509Key.ID()},
+				"*.docker.io/notary*":      {ecdsax509Key.ID()},
+			},
+			DisableTOFU: true,
+		},
+	)
+	require.Error(t, err, "failed to validate certID with intermediate")
+
+	// exact match should take precedence
+	validatedRoot, err = trustpinning.ValidateRoot(
+		nil,
+		signedRoot,
+		"replica.docker.io/notary/leaf",
+		trustpinning.TrustPinConfig{
+			Certs: map[string][]string{
+				"replica.docker.io/notary/leaf": {ecdsax509Key.ID()},
+				"docker.io/notar*":      {"badID"},
+				"*.docker.io/notary/leaf":      {"badID"},
+				"*.docker.io/notar*":      {"badID"},
+			},
+			DisableTOFU: true,
+		},
+	)
+	require.NoError(t, err, "failed to validate certID with intermediate")
+	for idx, sig := range typedSignedRoot.Signatures {
+		if sig.KeyID == ecdsax509Key.ID() {
+			typedSignedRoot.Signatures[idx].IsValid = true
+		}
+	}
+	require.Equal(t, typedSignedRoot, validatedRoot)
+}
+
 func TestValidateRootFailuresWithPinnedCert(t *testing.T) {
 	typedSignedRoot, err := data.RootFromSigned(sampleRootData(t).rootMeta)
+	typedWildcardSignedRoot, err := data.RootFromSigned(sampleWildcardRootData(t).rootMeta)
 	require.NoError(t, err)
 
 	// This call to trustpinning.ValidateRoot should fail due to an incorrect cert ID
@@ -430,6 +659,14 @@ func TestValidateRootFailuresWithPinnedCert(t *testing.T) {
 	require.NoError(t, err)
 	typedSignedRoot.Signatures[0].IsValid = true
 	require.Equal(t, typedSignedRoot, validatedRoot)
+
+	// This call to trustpinning.ValidateRoot should succeeed because GUN matches as subdomain of root
+	validatedRoot, err = trustpinning.ValidateRoot(nil, sampleWildcardRootData(t).rootMeta, "replica.docker.com/notary",
+		trustpinning.TrustPinConfig{Certs: map[string][]string{"*.docker.com/notary": {sampleWildcardRootData(t).rootPubKeyID}}, DisableTOFU: true})
+	require.NoError(t, err)
+	typedSignedRoot.Signatures[0].IsValid = true
+	require.Equal(t, typedWildcardSignedRoot, validatedRoot)
+
 }
 
 func TestValidateRootWithPinnedCA(t *testing.T) {
@@ -1300,13 +1537,21 @@ func TestWildcardMatching(t *testing.T) {
 	}{
 		{"docker.com/*", "docker.com/notary", true},
 		{"docker.com/**", "docker.com/notary", true},
-		{"*", "docker.com/any", true},
+		{"*/*", "docker.com/any", true},
+		{"*", "docker.com/any", false},
+		{"*", "docker.com", true},
 		{"*", "", true},
-		{"**", "docker.com/any", true},
+		{"**", "docker.com/any", false},
 		{"test/*******", "test/many/wildcard", true},
 		{"test/**/*/", "test/test", false},
 		{"test/*/wild", "test/test/wild", false},
-		{"*/all", "test/all", false},
+		{"/*", "docker.com/any", false},
+		{"/*", "/any", true},
+		{"*any/", "many", true}	,
+		{"*any/", "any", true}	,
+		{"*any/", "many/", true},
+		{"*any/", "many/a", false},
+		{"*/all", "test/all", true},
 		{"docker.com/*/*", "docker.com/notary/test", false},
 		{"docker.com/*/**", "docker.com/notary/test", false},
 		{"", "*", false},
@@ -1314,6 +1559,6 @@ func TestWildcardMatching(t *testing.T) {
 		{"test/*/wild*", "test/test/wild", false},
 	}
 	for _, tt := range wildcardTests {
-		require.Equal(t, trustpinning.MatchCNToGun(tt.CN, data.GUN(tt.gun)), tt.out)
+		require.Equal(t, tt.out, trustpinning.MatchCNToGun(tt.CN, data.GUN(tt.gun)), "checking %s against %s", tt.CN, data.GUN(tt.gun))
 	}
 }

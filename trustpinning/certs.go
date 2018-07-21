@@ -85,7 +85,7 @@ We shall call this: TOFUS.
 Validation failure at any step will result in an ErrValidationFailed error.
 */
 func ValidateRoot(prevRoot *data.SignedRoot, root *data.Signed, gun data.GUN, trustPinning TrustPinConfig) (*data.SignedRoot, error) {
-	logrus.Debugf("entered ValidateRoot with dns: %s", gun)
+	logrus.Infof("entered ValidateRoot with dns: %s", gun)
 	signedRoot, err := data.RootFromSigned(root)
 	if err != nil {
 		return nil, err
@@ -106,7 +106,7 @@ func ValidateRoot(prevRoot *data.SignedRoot, root *data.Signed, gun data.GUN, tr
 		return nil, &ErrValidationFail{Reason: "unable to retrieve valid leaf certificates"}
 	}
 
-	logrus.Debugf("found %d leaf certs, of which %d are valid leaf certs for %s", len(allLeafCerts), len(certsFromRoot), gun)
+	logrus.Infof("found %d leaf certs, of which %d are valid leaf certs for %s", len(allLeafCerts), len(certsFromRoot), gun)
 
 	// If we have a previous root, let's try to use it to validate that this new root is valid.
 	havePrevRoot := prevRoot != nil
@@ -121,7 +121,7 @@ func ValidateRoot(prevRoot *data.SignedRoot, root *data.Signed, gun data.GUN, tr
 
 		// Use the certificates we found in the previous root for the GUN to verify its signatures
 		// This could potentially be an empty set, in which case we will fail to verify
-		logrus.Debugf("found %d valid root leaf certificates for %s: %s", len(trustedLeafCerts), gun,
+		logrus.Infof("found %d valid root leaf certificates for %s: %s", len(trustedLeafCerts), gun,
 			prettyFormatCertIDs(trustedLeafCerts))
 
 		// Extract the previous root's threshold for signature verification
@@ -132,7 +132,7 @@ func ValidateRoot(prevRoot *data.SignedRoot, root *data.Signed, gun data.GUN, tr
 		err = signed.VerifySignatures(
 			root, data.BaseRole{Keys: utils.CertsToKeys(trustedLeafCerts, allTrustedIntCerts), Threshold: prevRootRoleData.Threshold})
 		if err != nil {
-			logrus.Debugf("failed to verify TUF data for: %s, %v", gun, err)
+			logrus.Infof("failed to verify TUF data for: %s, %v", gun, err)
 			return nil, &ErrRootRotationFail{Reason: "failed to validate data with current trusted certificates"}
 		}
 		// Clear the IsValid marks we could have received from VerifySignatures
@@ -142,7 +142,7 @@ func ValidateRoot(prevRoot *data.SignedRoot, root *data.Signed, gun data.GUN, tr
 	}
 
 	// Regardless of having a previous root or not, confirm that the new root validates against the trust pinning
-	logrus.Debugf("checking root against trust_pinning config for %s", gun)
+	logrus.Infof("checking root against trust_pinning config for %s", gun)
 	trustPinCheckFunc, err := NewTrustPinChecker(trustPinning, gun, !havePrevRoot)
 	if err != nil {
 		return nil, &ErrValidationFail{Reason: err.Error()}
@@ -150,9 +150,9 @@ func ValidateRoot(prevRoot *data.SignedRoot, root *data.Signed, gun data.GUN, tr
 
 	validPinnedCerts := map[string]*x509.Certificate{}
 	for id, cert := range certsFromRoot {
-		logrus.Debugf("checking trust-pinning for cert: %s", id)
+		logrus.Infof("checking trust-pinning for cert: %s", id)
 		if ok := trustPinCheckFunc(cert, validIntCerts[id]); !ok {
-			logrus.Debugf("trust-pinning check failed for cert: %s", id)
+			logrus.Infof("trust-pinning check failed for cert: %s", id)
 			continue
 		}
 		validPinnedCerts[id] = cert
@@ -180,12 +180,35 @@ func ValidateRoot(prevRoot *data.SignedRoot, root *data.Signed, gun data.GUN, tr
 // MatchCNToGun checks that the common name in a cert is valid for the given gun.
 // This allows wildcards as suffixes, e.g. `namespace/*`
 func MatchCNToGun(commonName string, gun data.GUN) bool {
-	if strings.HasSuffix(commonName, wildcard) {
-		prefix := strings.TrimRight(commonName, wildcard)
-		logrus.Debugf("checking gun %s against wildcard prefix %s", gun, prefix)
-		return strings.HasPrefix(gun.String(), prefix)
+	gunParts := strings.SplitN(gun.String(), "/", 2)
+	cnParts := strings.SplitN(commonName, "/", 2)
+	gunHostname, gunResource := gunParts[0], ""
+	cnHostname, cnResource := cnParts[0], ""
+	if len(gunParts) == 2 {
+		gunResource = gunParts[1]
 	}
-	return commonName == gun.String()
+	if len(cnParts) == 2 {
+		cnResource = cnParts[1]
+	}
+
+
+	if strings.HasPrefix(cnHostname, wildcard) {
+		suffix := strings.TrimLeft(cnHostname, wildcard)
+		logrus.Infof("checking hostname gun %s against wildcard suffix %s", gunHostname, suffix)
+		if !strings.HasSuffix(gunHostname, suffix) {
+			return false
+		}
+	} else {
+		if gunHostname != cnHostname {
+			return false
+		}
+	}
+	if strings.HasSuffix(cnResource, wildcard) {
+		prefix := strings.TrimRight(cnResource, wildcard)
+		logrus.Infof("checking gun resource %s against wildcard prefix %s", gunResource, prefix)
+		return strings.HasPrefix(gunResource, prefix)
+	}
+	return cnResource == gunResource
 }
 
 // validRootLeafCerts returns a list of possibly (if checkExpiry is true) non-expired, non-sha1 certificates
@@ -198,7 +221,7 @@ func validRootLeafCerts(allLeafCerts map[string]*x509.Certificate, gun data.GUN,
 	for id, cert := range allLeafCerts {
 		// Validate that this leaf certificate has a CN that matches the gun
 		if !MatchCNToGun(cert.Subject.CommonName, gun) {
-			logrus.Debugf("error leaf certificate CN: %s doesn't match the given GUN: %s",
+			logrus.Infof("error leaf certificate CN: %s doesn't match the given GUN: %s",
 				cert.Subject.CommonName, gun)
 			continue
 		}

@@ -48,7 +48,7 @@ func NewTrustPinChecker(trustPinConfig TrustPinConfig, gun data.GUN, firstBootst
 	t := trustPinChecker{gun: gun, config: trustPinConfig}
 	// Determine the mode, and if it's even valid
 	if pinnedCerts, ok := trustPinConfig.Certs[gun.String()]; ok {
-		logrus.Debugf("trust-pinning using Cert IDs")
+		logrus.Infof("trust-pinning using Cert IDs")
 		t.pinnedCertIDs = pinnedCerts
 		return t.certsCheck, nil
 	}
@@ -59,7 +59,7 @@ func NewTrustPinChecker(trustPinConfig TrustPinConfig, gun data.GUN, firstBootst
 	}
 
 	if caFilepath, err := getPinnedCAFilepathByPrefix(gun, trustPinConfig); err == nil {
-		logrus.Debugf("trust-pinning using root CA bundle at: %s", caFilepath)
+		logrus.Infof("trust-pinning using root CA bundle at: %s", caFilepath)
 
 		// Try to add the CA certs from its bundle file to our certificate store,
 		// and use it to validate certs in the root.json later
@@ -71,7 +71,7 @@ func NewTrustPinChecker(trustPinConfig TrustPinConfig, gun data.GUN, firstBootst
 		caRootPool := x509.NewCertPool()
 		for _, caCert := range caCerts {
 			if err = utils.ValidateCertificate(caCert, true); err != nil {
-				logrus.Debugf("ignoring root CA certificate with CN %s in bundle: %s", caCert.Subject.CommonName, err)
+				logrus.Infof("ignoring root CA certificate with CN %s in bundle: %s", caCert.Subject.CommonName, err)
 				continue
 			}
 			caRootPool.AddCert(caCert)
@@ -124,14 +124,46 @@ func (t trustPinChecker) tofusCheck(leafCert *x509.Certificate, intCerts []*x509
 }
 
 // Will return the CA filepath corresponding to the most specific (longest) entry in the map that is still a prefix
-// of the provided gun.  Returns an error if no entry matches this GUN as a prefix.
+// of the provided gun. Hostnames can include wildcards, and longest matching hostname is used.
+// The most specific entry found is one with longest matching hostname, and longest matching resource prefix.
+// Returns an error if no entry matches this GUN as a prefix.
 func getPinnedCAFilepathByPrefix(gun data.GUN, t TrustPinConfig) (string, error) {
-	specificGUN := ""
+	specificGUNHostname := ""
+	specificGUNResource := ""
 	specificCAFilepath := ""
 	foundCA := false
-	for gunPrefix, caFilepath := range t.CA {
-		if strings.HasPrefix(gun.String(), gunPrefix) && len(gunPrefix) >= len(specificGUN) {
-			specificGUN = gunPrefix
+	gunParts := strings.SplitN(gun.String(), "/", 2)
+	gunHostname, gunResource := gunParts[0], ""
+	if len(gunParts) == 2 {
+		gunResource = gunParts[1]
+	}
+
+	// find longest matching hostname suffix
+	for gunMatch, _ := range t.CA {
+		matchParts := strings.SplitN(gunMatch, "/", 2)
+		matchHostname := matchParts[0]
+		logrus.Infof("Checking pinned CA hostname %s against gun hostname %s", matchHostname, gunHostname)
+
+		if strings.HasPrefix(matchHostname, "*") {
+			logrus.Infof("Checking hostname gun %s against wildcard suffix %s", gunHostname, matchHostname[1:])
+			if strings.HasSuffix(gunHostname, matchHostname[1:]) && len(matchHostname) > len(specificGUNHostname) {
+				specificGUNHostname = matchHostname
+			}
+		}
+		if gunHostname == matchHostname {
+			specificGUNHostname = matchHostname
+		}
+	}
+
+	// find CA matching longest hostname with most specific resource path prefix
+	for gunMatch, caFilepath := range t.CA {
+		matchParts := strings.SplitN(gunMatch, "/", 2)
+		matchHostname, matchResource := matchParts[0], ""
+		if len(matchParts) == 2 {
+			matchResource = matchParts[1]
+		}
+		if specificGUNHostname == matchHostname && strings.HasPrefix(gunResource, matchResource) && len(matchResource) >= len(specificGUNResource) {
+			specificGUNResource = matchResource
 			specificCAFilepath = caFilepath
 			foundCA = true
 		}
@@ -143,18 +175,55 @@ func getPinnedCAFilepathByPrefix(gun data.GUN, t TrustPinConfig) (string, error)
 }
 
 // wildcardMatch will attempt to match the most specific (longest prefix) wildcarded
-// trustpinning option for key IDs. Given the simple globbing and the use of maps,
-// it is impossible to have two different prefixes of equal length.
-// This logic also solves the issue of Go's randomization of map iteration.
+// trustpinning option for key IDs. The host name is stripped from the GUN to the
+// longest matching wildcarded subdomain pinning, so the longest trustpinning is per path.
+// Given the simple globbing and the use of maps, it is impossible to have two different
+// prefixes of equal length. This logic also solves the issue of Go's randomization of map iteration.
 func wildcardMatch(gun data.GUN, certs map[string][]string) ([]string, bool) {
 	var (
-		longest = ""
+		longestHostname = ""
+		longestResource = ""
 		ids     []string
 	)
-	for gunPrefix, keyIDs := range certs {
-		if strings.HasSuffix(gunPrefix, "*") {
-			if strings.HasPrefix(gun.String(), gunPrefix[:len(gunPrefix)-1]) && len(gunPrefix) > len(longest) {
-				longest = gunPrefix
+	gunParts := strings.SplitN(gun.String(), "/", 2)
+	gunHostname, gunResource := gunParts[0], ""
+	if len(gunParts) == 2 {
+		gunResource = gunParts[1]
+	}
+	for gunMatch, keyIDs := range certs {
+		matchParts := strings.SplitN(gunMatch, "/", 2)
+		matchHostname, matchResource := matchParts[0], ""
+		if len(matchParts) == 2 {
+			matchResource = matchParts[1]
+		}
+		logrus.Infof("Checking match hostname %s against gun hostname %s", matchHostname, gunHostname)
+
+		if strings.HasPrefix(matchHostname, "*") {
+			suffix := strings.TrimLeft(matchHostname, "*")
+			logrus.Infof("Checking hostname gun %s against wildcard suffix %s", gunHostname, suffix)
+			if strings.HasSuffix(gunHostname, matchHostname[1:]) && len(matchHostname) > len(longestHostname) {
+				longestHostname = matchHostname
+				if matchResource == gunResource {
+					ids = keyIDs
+				}
+			}
+		}
+		if gunHostname == matchHostname {
+			longestHostname = matchHostname
+		}
+	}
+
+	for gunMatch, keyIDs := range certs {
+		matchParts := strings.SplitN(gunMatch, "/", 2)
+		matchHostname, matchResource := matchParts[0], ""
+		if len(matchParts) == 2 {
+			matchResource = matchParts[1]
+		}
+
+		logrus.Infof("Checking match resource %s against gun resource %s", matchResource, gunResource)
+		if longestHostname == matchHostname && strings.HasSuffix(matchResource, "*") {
+			if strings.HasPrefix(gunResource, matchResource[:len(matchResource)-1]) && len(matchResource) > len(longestResource) {
+				longestResource = matchResource
 				ids = keyIDs
 			}
 		}
